@@ -15,27 +15,13 @@
 #include <SPI.h>
 #include <SD.h>
 
-//The following code is taken from sleep.h as Arduino Software v22 (avrgcc) in w32 does not have the latest sleep.h file
-#define sleep_bod_disable() \
-{ \
-  uint8_t tempreg; \
-  __asm__ __volatile__("in %[tempreg], %[mcucr]" "\n\t" \
-                       "ori %[tempreg], %[bods_bodse]" "\n\t" \
-                       "out %[mcucr], %[tempreg]" "\n\t" \
-                       "andi %[tempreg], %[not_bodse]" "\n\t" \
-                       "out %[mcucr], %[tempreg]" \
-                       : [tempreg] "=&d" (tempreg) \
-                       : [mcucr] "I" _SFR_IO_ADDR(MCUCR), \
-                         [bods_bodse] "i" (_BV(BODS) | _BV(BODSE)), \
-                         [not_bodse] "i" (~_BV(BODSE))); \
-}
 
 
 DS1337 RTC; //Create RTC object for DS1337 RTC
 static uint8_t prevSecond=0; 
 static DateTime interruptTime;
 
-static uint16_t interruptInterval = 3; //Seconds. Change this to suitable value.
+static uint16_t interruptInterval = 10; //Seconds. Change this to suitable value.
 
 
 void setup () 
@@ -54,6 +40,7 @@ void setup ()
      Serial.print("Load SD card...");
      pinMode(10, OUTPUT);
      digitalWrite(10, HIGH);
+     
      // Check if SD card can be intialized.
      if (!SD.begin(10))  //Chipselect is on pin 10
      {
@@ -61,8 +48,9 @@ void setup ()
         return;
      }
      Serial.println("SD Card found and initialized.");
+     // initialize digital pin 8 as an output for the LED.
+     pinMode(8, OUTPUT);
   
-     
      attachInterrupt(0, INT0_ISR, LOW); //Only LOW level interrupt can wake up from PWR_DOWN
      set_sleep_mode(SLEEP_MODE_PWR_DOWN);
  
@@ -107,9 +95,9 @@ void loop ()
     
     //|||||||||||||||||||Write to Disk|||||||||||||||||||||||||||||||||| 
     File logFile = SD.open("DATALOG.CSV", FILE_WRITE);
-    Serial.println(logFile == true);
-//    if (logFile) {
-      Serial.println("printing to logfile");
+    Serial.println(logFile);
+    if (logFile) {
+    Serial.println("printing to logfile");
     
     logFile.print(now.year(), DEC);
     logFile.print('/');
@@ -125,12 +113,21 @@ void loop ()
     logFile.print(',');
     logFile.println(voltage);
     logFile.close();
-//    }
+    digitalWrite(8, HIGH);
+    delay(100);
+    digitalWrite(8, LOW);
+    delay(100);
+    digitalWrite(8, HIGH);
+    delay(100);
+    digitalWrite(8, LOW);
+    delay(100);
+    }
 
     //|||||||||||||||||||Write to Disk||||||||||||||||||||||||||||||||||
     
     RTC.clearINTStatus(); //This function call is a must to bring /INT pin HIGH after an interrupt.
     RTC.enableInterrupts(interruptTime.hour(),interruptTime.minute(),interruptTime.second());    // set the interrupt at (h,m,s)
+    sleep_enable();      // Set sleep enable bit
     attachInterrupt(0, INT0_ISR, LOW);  //Enable INT0 interrupt (as ISR disables interrupt). This strategy is required to handle LEVEL triggered interrupt
     
     
@@ -141,23 +138,30 @@ void loop ()
             
     //Power Down routines
     cli(); 
-    sleep_enable();      // Set sleep enable bit
+    sleep_enable();
     sleep_bod_disable(); // Disable brown out detection during sleep. Saves more power
     sei();
-       
+//       
     digitalWrite(4,HIGH); //Power Off SD Card.
     
     Serial.println("\nSleeping");
-    delay(1000); //This delay is required to allow print to complete
+    delay(10); //This delay is required to allow print to complete
     // Shut down all peripherals like ADC before sleep. Refer Atmega328 manual
     power_all_disable(); // This shuts down ADC, TWI, SPI, Timers and USART
+//    power_adc_disable();
+//    power_spi_disable();
+//    power_timer0_disable();
+//    power_timer1_disable();
+//    power_timer2_disable();
+//    power_twi_disable();
+//    power_usart0_disable();
     sleep_cpu();         // Sleep the CPU as per the mode set earlier(power down)  
     sleep_disable();     // Wakes up sleep and clears enable bit. Before this ISR would have executed
     power_all_enable();  // This enables ADC, TWI, SPI, Timers and USART
-    delay(4000);         // This delay is required to allow CPU to stabilize
+    delay(10);         // This delay is required to allow CPU to stabilize
     Serial.println("Awake from sleep");    
     digitalWrite(4,LOW); //Power On SD Card.
-    
+
     //\/\/\/\/\/\/\/\/\/\/\/\/Sleep Mode and Power Saver routines\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\
 
 } 
@@ -166,7 +170,7 @@ void loop ()
 //Interrupt service routine for external interrupt on INT0 pin conntected to DS1337 /INT
 void INT0_ISR()
 {
-  //Keep this as short as possible. Possibly avoid using function calls
+    // Keep this as short as possible. Possibly avoid using function calls
     detachInterrupt(0); 
     interruptTime = DateTime(interruptTime.get() + interruptInterval);  //decide the time for next interrupt, configure next interrupt  
 }
