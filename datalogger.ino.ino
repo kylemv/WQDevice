@@ -91,13 +91,6 @@ void setup() {
      }
      delay(1500);
      
-     attachInterrupt(0, INT0_ISR, LOW); //Only LOW level interrupt can wake up from PWR_DOWN
-     set_sleep_mode(SLEEP_MODE_PWR_DOWN);
- 
-     // Enable Interrupt 
-     DateTime  start = RTC.now();
-     interruptTime = DateTime(start.get() + interruptInterval); //Add interruptInterval in seconds to start time
-     
            // Check if SD card can be initialized.
      if (!SD.begin(10))  //Chipselect is on pin 10
      {
@@ -127,6 +120,13 @@ void setup() {
      delay(100);
      
      Serial.println(F("SD Card found and initialized."));
+     
+     attachInterrupt(0, INT0_ISR, LOW); //Only LOW level interrupt can wake up from PWR_DOWN
+     set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+ 
+     // Enable Interrupt 
+     DateTime  start = RTC.now();
+     interruptTime = DateTime(start.get() + interruptInterval); //Add interruptInterval in seconds to start time
 }
 
 void loop() {
@@ -140,7 +140,15 @@ void loop() {
 //    Serial.print("pH: ");
 //    Serial.println(ph, DEC);
     
-    sendPOSTRequest(ph, temp);
+    boolean sentValuesVia3G = false;
+    int i = 0;
+    while (!sentValuesVia3G && i < 3) {
+      Serial.println(F("SENTVALUESVIA3G: "));
+      Serial.println(sentValuesVia3G);
+      sentValuesVia3G = sendPOSTRequest(ph, temp);
+      i++;
+    }
+    
     writeToSDCard(ph, temp);
     goToSleep();
     
@@ -158,7 +166,13 @@ void goToSleep() {
     sleep_bod_disable(); // Disable brown out detection during sleep. Saves more power
     sei();
     digitalWrite(4,HIGH); // Power Off SD Card.
-    blinkLED(1000);
+    delay(1000);
+    digitalWrite(FONA_RST, HIGH); // Power Off FONA.
+    delay(10);
+    digitalWrite(FONA_RST, LOW);
+    delay(100);
+    digitalWrite(8, HIGH);
+    blinkLED(1000, 1);
     Serial.println(F("\nSleeping"));
     delay(10); //This delay is required to allow print to complete
     // Shut down all peripherals like ADC before sleep. Refer Atmega328 manual
@@ -169,8 +183,13 @@ void goToSleep() {
     delay(10);         // This delay is required to allow CPU to stabilize
     Serial.println(F("Awake from sleep"));    
     digitalWrite(4,LOW); //Power On SD Card.
-    delay(1500);
-    blinkLED(1000);
+    digitalWrite(FONA_RST, HIGH); // Power Off FONA.
+    delay(10);
+    digitalWrite(FONA_RST, LOW);
+    delay(100);
+    digitalWrite(FONA_RST, HIGH);
+    delay(7000);
+    blinkLED(1000, 1);
 }
 
 void writeToSDCard(float phVal, float tempVal) {
@@ -199,11 +218,11 @@ void writeToSDCard(float phVal, float tempVal) {
       logFile.print(':');
       logFile.print(now.second(), DEC);
       logFile.close();
-      blinkLED(100);
+      blinkLED(100, 1);
     }
 }
 
-void sendPOSTRequest(float phVal, float tempVal) {
+boolean sendPOSTRequest(float phVal, float tempVal) {
   char request[160] = "POST /data/newData HTTP/1.1\r\nContent-Length: 52\r\nHost: vaccine.cs.umd.edu\r\nAccept: text/html\r\n\r\ndevice_id=1&data_type=water&ph=";
   char phArr[5];
   char tempArr[5];
@@ -224,10 +243,12 @@ void sendPOSTRequest(float phVal, float tempVal) {
       answer = sendATcommand("AT+CHTTPSSEND=155", ">", 5000);
       if (answer == 1) {
         answer = sendATcommand(request, "OK", 5000); 
+        blinkLED(10, 3);
         if (answer == 1) { 
           // request the url
           answer = sendATcommand("AT+CHTTPSSEND", "OK", 5000);
-          blinkLED(10);
+          blinkLED(10, 3);
+          return true;
         } else {
           Serial.println(F("Error sending request to FONA"));
         }
@@ -249,7 +270,7 @@ void sendPOSTRequest(float phVal, float tempVal) {
   delay(100);
   digitalWrite(FONA_RST, HIGH);
   delay(7000);
-  return;
+  return false;
 }
 
 int8_t sendATcommand(char* ATcommand, char* expected_answer, unsigned int timeout){
@@ -319,10 +340,59 @@ float getTemp() {
   return TemperatureSum + 17.0;
 }
 
-//// returns current pH
+// returns current pH
 float getpH() {
   return (float) 3.5 * (analogRead(phPin) * 5.0/1024) + Offset;
 }
+
+//float getpH() {
+//  int pHArray[ArrayLength]; // Store the average value of the sensor feedback
+//  int pHArrayIndex = 0;
+//  static unsigned long samplingTime = millis();
+//  static float pHValue, voltage;
+//  if (millis() - samplingTime > samplingInterval) {
+//      pHArray[pHArrayIndex++] = analogRead(phPin);
+//      if (pHArrayIndex == ArrayLength) {
+//        pHArrayIndex = 0;
+//      }
+//      voltage = averageArray(pHArray, ArrayLength) * 5.0/1024;
+////      voltage = analogRead(phPin) * 5.0/1024;
+//      pHValue = 3.5 * voltage + Offset;
+//  }
+//  return pHValue; 
+//}
+
+//double averageArray(int* arr, int number) {
+//  int i, max, min;
+//  double avg;
+//  long amount = 0;
+//  if (number <= 0) {
+//    Serial.println("Error: averageArray(): number can't be less than or equal to 0/n");
+//    return 0;
+//  }
+//  if (number < 5) {   
+//    for (i = 0; i < number; i++) {
+//      amount += arr[i];
+//    }
+//    return amount/number;
+//  } else {
+//    arr[0] < arr[1] ? min = arr[0], max = arr[1] : min = arr[1], max = arr[0];
+//    for (i = 2; i < number; i++) {
+//      if (arr[i] < min) {
+//        amount += min;        //arr<min
+//        min = arr[i];
+//      } else {
+//        if (arr[i] > max) {
+//          amount += max;    //arr>max
+//          max = arr[i];
+//        } else {
+//          amount += arr[i]; //min<=arr<=max
+//        }
+//      } // end if
+//    } // end for
+//    return (double) amount / (number-2);
+//  } // end if
+//}
 
 //Interrupt service routine for external interrupt on INT0 pin conntected to DS1337 /INT
 void INT0_ISR()
@@ -332,12 +402,15 @@ void INT0_ISR()
     interruptTime = DateTime(interruptTime.get() + interruptInterval);  //decide the time for next interrupt, configure next interrupt  
 }
 
-void blinkLED(int seconds) {
-  digitalWrite(LED, HIGH);
-  delay(seconds);
-  digitalWrite(LED, LOW);
-  delay(seconds);
-  digitalWrite(LED, HIGH);
-  delay(seconds);
-  digitalWrite(LED, LOW);
+void blinkLED(int seconds, int times) {
+  int i;
+  for (i = 0; i < times; i++) {
+    digitalWrite(LED, HIGH);
+    delay(seconds);
+    digitalWrite(LED, LOW);
+    delay(seconds);
+    digitalWrite(LED, HIGH);
+    delay(seconds);
+    digitalWrite(LED, LOW);
+  }
 }
