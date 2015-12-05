@@ -1,45 +1,16 @@
-//Data logger Demonstration using Seeeduino Stalker v3.0. Logs Battery Voltage every 10 seconds to DATALOG.CSV file
-//Use this demo code to implement your Datalogger functionality, add additional sensors.
-
-//1.Solder P3 and P2 PCB jumper pads
-//2.Compile and upload the sketch
-//3.See if everything works fine using Serial Monitor.
-//4.Remove all Serial port code, recompile the sketch and upload.
-// This reduces power consumption during battery mode.
-
 #include <avr/sleep.h> 
 #include <avr/power.h>
 #include <Wire.h>
-#include <AESLib.h>
-#include <Adafruit_FONA.h>
 #include <OneWire.h>
 #include <DS1337.h>
 #include <SPI.h>
 #include <SD.h>
 #include <SoftwareSerial.h>
-#include <Math.h>
-#include <Time.h>
+#include <String.h>
 
-// FONA.....................................
-#define FONA_RX 2
-#define FONA_TX 3
-#define FONA_RST 4
-char replybuffer[255]; // this is a large buffer for replies
-#include <SoftwareSerial.h>
-SoftwareSerial fonaSS = SoftwareSerial(FONA_TX, FONA_RX);
-SoftwareSerial *fonaSerial = &fonaSS;
-Adafruit_FONA_3G fona = Adafruit_FONA_3G(FONA_RST);
-uint8_t readline(char *buff, uint8_t maxbuff, uint16_t timeout = 0);
-uint8_t type;
-/* ..................................................................... */
-
-
-// TURBIDITY ..............................
-#define turbidityPin A1 // turbidity sensor analog output to Arduino Analog Input 1
-#define turbidityOffset 0
-#define thermistorPin A2
-/*.........................................................................*/
-
+#define FONA_RX 5
+#define FONA_TX 6
+#define FONA_RST 7
 
 // pH ....................................
 #define phPin A0        // pH meter Analog output to Arduino Analog Input 0
@@ -47,117 +18,173 @@ uint8_t type;
 #define samplingInterval 20
 #define printInterval 800
 #define ArrayLength 40    // times of collection
-int pHArray[ArrayLength]; // Store the average value of the sensor feedback
-int pHArrayIndex = 0;
-/* .............................................................................*/
 
-// TEMPERATURE ..................................
-int tempPin = 7;
-# define tempOffset 17.0
-OneWire ds(tempPin);
-/*........................................................................*/
+/* .............................................................................*/
 
 // INTERRUPTS................................
 DS1337 RTC; // Create RTC object for DS1337 RTC
-static uint8_t prevSecond=0; 
+static uint8_t prevSecond = 0; 
 static DateTime interruptTime;
-static uint16_t interruptInterval = 10; //Seconds. Change this to suitable value.
+static uint16_t interruptInterval = 5; //Seconds. Change this to suitable value.
 /* ..............................................................................  */
 
-#define LED 8
+#define LED 9
 
-String data = "";
-float temp = -1.00; // in F
-float ph = -1.00;
-float turbidity = -1.00;
-float thermistorTemp = -1.00;
+#include <SoftwareSerial.h>
+SoftwareSerial fonaSS = SoftwareSerial(FONA_TX, FONA_RX);
+SoftwareSerial *fonaSerial = &fonaSS;
 
-void setup () {
+void setup() {
      /*Initialize INT0 pin for accepting interrupts */
      PORTD |= 0x04;
      DDRD &=~ 0x04;
+     
      Serial.begin(115200);
      RTC.begin();
      
      pinMode(4,OUTPUT);//SD Card power control pin. LOW = On, HIGH = Off
-     digitalWrite(4,LOW); //Power On SD Card.
-
+     digitalWrite(4,LOW); //Power On SD Card. 
+     
+     pinMode(9, OUTPUT);
+     digitalWrite(LED, HIGH);
+     delay(100);
+     digitalWrite(LED, LOW);
+     delay(100);
+     digitalWrite(LED, HIGH);
+     delay(100);
+     digitalWrite(LED, LOW);
+     delay(100);
+     digitalWrite(LED, HIGH);
+     
      pinMode(10, OUTPUT);
      digitalWrite(10, HIGH);
      
+     Serial.println(F("Starting up fona"));
      fonaSerial->begin(4800);
-     if (! fona.begin(*fonaSerial)) {
+     pinMode(FONA_RST, OUTPUT);
+     digitalWrite(FONA_RST, HIGH);
+     delay(10);
+     digitalWrite(FONA_RST, LOW);
+     delay(100);
+     digitalWrite(FONA_RST, HIGH);
+
+     // give 7 seconds to reboot
+     delay(7000);
+     int answer = sendATcommand("AT", "OK", 2000);
+     if (answer != 1) {
        Serial.println(F("Couldn't find FONA"));
-       while (1);
+       return;
+     } 
+     Serial.println("FONA is OK");
+     
+     delay(100);
+
+     answer = sendATcommand("AT+CGSOCKCONT=1,\"IP\",\"wholesale\",\"0.0.0.0\",0,0", "OK", 2000);
+     if (answer != 1) {
+       Serial.println(F("CGSOCKCONT failed"));
      }
-     Serial.println(F("FONA is OK"));
-     Serial.print(F("Found "));
-     
-     Serial.print("Load SD card...");
-     
-     // Check if SD card can be initialized.
-     if (!SD.begin(10))  //Chipselect is on pin 10
-     {
-        Serial.println("SD Card could not be initialized, or not found");
-        return;
+
+     delay(500);
+     answer = sendATcommand("AT+CSOCKAUTH=1,2,\"SIMCOM\",\"123\"", "OK", 2000);
+     if (answer != 1) {
+       Serial.println(F("CGSOCKAUTH failed"));
      }
-     Serial.println("SD Card found and initialized.");
-     
+     delay(1500);
      
      attachInterrupt(0, INT0_ISR, LOW); //Only LOW level interrupt can wake up from PWR_DOWN
      set_sleep_mode(SLEEP_MODE_PWR_DOWN);
  
-     //Enable Interrupt 
-     //RTC.enableInterrupts(EveryMinute); //interrupt at  EverySecond, EveryMinute, EveryHour
-     // or this
+     // Enable Interrupt 
      DateTime  start = RTC.now();
      interruptTime = DateTime(start.get() + interruptInterval); //Add interruptInterval in seconds to start time
      
-     // initialize digital pin 8 as an output for the LED.
-     pinMode(LED, OUTPUT);
+           // Check if SD card can be initialized.
+     if (!SD.begin(10))  //Chipselect is on pin 10
+     {
+        Serial.println(F("SD Card could not be initialized, or not found"));
+        delay(100);
+        Serial.println(F("Trying again"));
+        if (!SD.begin(10))  //Chipselect is on pin 10
+        {
+          Serial.println(F("SD Card could not be initialized, or not found"));
+          delay(100);
+          Serial.println(F("Trying again"));
+          if (!SD.begin(10))  //Chipselect is on pin 10
+          {
+            Serial.println(F("SD Card could not be initialized, or not found"));
+            delay(100);
+            return;   
+          }
+        }
+     }
+     digitalWrite(LED, HIGH);
+     delay(100);
+     digitalWrite(LED, LOW);
+     delay(100);
+     digitalWrite(LED, HIGH);
+     delay(100);
+     digitalWrite(LED, LOW);
+     delay(100);
+     
+     Serial.println(F("SD Card found and initialized."));
 }
 
-void loop () {
-    float voltage;
-    int BatteryValue;
- 
-    BatteryValue = analogRead(A7);
-    voltage = BatteryValue * (1.1 / 1024)* (10+2)/2;  //Voltage divider
-    Serial.print("Battery: ");
-    Serial.println(voltage, DEC);
+void loop() {
+//    float voltage = analogRead(A7) * (1.1 / 1024)* (10+2)/2;  // Voltage divider
     
-    temp = getTemp(1);
-    Serial.print("Temp: ");
-    Serial.println(temp, DEC);
+    float temp = getTemp();
+//    Serial.print("Temp: ");
+//    Serial.println(temp, DEC);
     
-    ph = getpH();
-    Serial.print("pH: ");
-    Serial.println(ph, DEC);
+    float ph = getpH();
+//    Serial.print("pH: ");
+//    Serial.println(ph, DEC);
     
-    turbidity = getTurbidity();
-    Serial.print("turbidity: ");
-    Serial.println(turbidity, DEC);
+    sendPOSTRequest(ph, temp);
+    writeToSDCard(ph, temp);
+    goToSleep();
     
-    thermistorTemp = getThermistorTemp();
-    Serial.print("thermistorTemp: ");
-    Serial.println(thermistorTemp, DEC);
-    
+}
+
+void goToSleep() {
+    RTC.clearINTStatus(); //This function call is a must to bring /INT pin HIGH after an interrupt.
+    RTC.enableInterrupts(interruptTime.hour(),interruptTime.minute(),interruptTime.second());    // set the interrupt at (h,m,s)
+    sleep_enable();      // Set sleep enable bit
+    attachInterrupt(0, INT0_ISR, LOW);  //Enable INT0 interrupt (as ISR disables interrupt). This strategy is required to handle LEVEL triggered interrupt
+                  
+    //Power Down routines
+    cli(); 
+    sleep_enable();
+    sleep_bod_disable(); // Disable brown out detection during sleep. Saves more power
+    sei();
+    digitalWrite(4,HIGH); // Power Off SD Card.
+    blinkLED(1000);
+    Serial.println(F("\nSleeping"));
+    delay(10); //This delay is required to allow print to complete
+    // Shut down all peripherals like ADC before sleep. Refer Atmega328 manual
+    power_all_disable(); // This shuts down ADC, TWI, SPI, Timers and USART
+    sleep_cpu();         // Sleep the CPU as per the mode set earlier(power down)
+    sleep_disable();     // Wakes up sleep and clears enable bit. Before this ISR would have executed
+    power_all_enable();  // This enables ADC, TWI, SPI, Timers and USART
+    delay(10);         // This delay is required to allow CPU to stabilize
+    Serial.println(F("Awake from sleep"));    
+    digitalWrite(4,LOW); //Power On SD Card.
+    delay(1500);
+    blinkLED(1000);
+}
+
+void writeToSDCard(float phVal, float tempVal) {
     DateTime now = RTC.now(); //get the current date-time
-    prevSecond = now.second();
-    
-    //|||||||||||||||||||Write to Disk|||||||||||||||||||||||||||||||||| 
     File logFile = SD.open("DATALOG.CSV", FILE_WRITE);
     Serial.println(logFile);
+
     if (logFile) {
-      Serial.println("printing to logfile");
+      Serial.println(F("printing to logfile"));
       // temp
-      logFile.print(temp, DEC);
+      logFile.print(tempVal, DEC);
       logFile.print(',');
       // pH
-      logFile.print(ph, DEC);
-      logFile.print(',');
-      // turbidity
-      logFile.print(turbidity, DEC);
+      logFile.print(phVal, DEC);
       logFile.print(',');
       // timestamp
       logFile.print(now.year(), DEC);
@@ -171,174 +198,146 @@ void loop () {
       logFile.print(now.minute(), DEC);
       logFile.print(':');
       logFile.print(now.second(), DEC);
-      logFile.print(',');
-      logFile.println(voltage);
       logFile.close();
+      blinkLED(100);
     }
+}
 
-    //|||||||||||||||||||Write to Disk||||||||||||||||||||||||||||||||||
-    
-    RTC.clearINTStatus(); //This function call is a must to bring /INT pin HIGH after an interrupt.
-    RTC.enableInterrupts(interruptTime.hour(),interruptTime.minute(),interruptTime.second());    // set the interrupt at (h,m,s)
-    sleep_enable();      // Set sleep enable bit
-    attachInterrupt(0, INT0_ISR, LOW);  //Enable INT0 interrupt (as ISR disables interrupt). This strategy is required to handle LEVEL triggered interrupt
-    delay(5000);
-            
-    //Power Down routines
-    cli(); 
-    sleep_enable();
-    sleep_bod_disable(); // Disable brown out detection during sleep. Saves more power
-    sei();
-    digitalWrite(4,HIGH); // Power Off SD Card.
-    
-    Serial.println("\nSleeping");
-    delay(10); //This delay is required to allow print to complete
-    // Shut down all peripherals like ADC before sleep. Refer Atmega328 manual
-    power_all_disable(); // This shuts down ADC, TWI, SPI, Timers and USART
-    sleep_cpu();         // Sleep the CPU as per the mode set earlier(power down)
-    sleep_disable();     // Wakes up sleep and clears enable bit. Before this ISR would have executed
-    power_all_enable();  // This enables ADC, TWI, SPI, Timers and USART
-    delay(10);         // This delay is required to allow CPU to stabilize
-    Serial.println("Awake from sleep");    
-    digitalWrite(4,LOW); //Power On SD Card.
-} 
+void sendPOSTRequest(float phVal, float tempVal) {
+  char request[160] = "POST /data/newData HTTP/1.1\r\nContent-Length: 52\r\nHost: vaccine.cs.umd.edu\r\nAccept: text/html\r\n\r\ndevice_id=1&data_type=water&ph=";
+  char phArr[5];
+  char tempArr[5];
+  dtostrf(phVal,4,1,phArr);
+  dtostrf(tempVal,4,1,tempArr);
+  strcat(request, phArr);
+  strcat(request, "&temperature=");
+  strcat(request, tempArr);
+//  Serial.print(F("REQUEST IS: "));
+//  Serial.println(request);
+  // gets the SSL stack
+  int answer = sendATcommand("AT+CHTTPSSTART", "OK", 10000);
+  if (answer == 1) { 
+    // Opens the HTTP session
+    answer = sendATcommand("AT+CHTTPSOPSE=\"vaccine.cs.umd.edu\",80,1", "OK", 30000);
+    if (answer == 1) {
+      // Stores and sends the request
+      answer = sendATcommand("AT+CHTTPSSEND=155", ">", 5000);
+      if (answer == 1) {
+        answer = sendATcommand(request, "OK", 5000); 
+        if (answer == 1) { 
+          // request the url
+          answer = sendATcommand("AT+CHTTPSSEND", "OK", 5000);
+          blinkLED(10);
+        } else {
+          Serial.println(F("Error sending request to FONA"));
+        }
+      } else {
+        Serial.println(F("Error in sending aux_str to FONA"));
+      }
+    } else {
+       Serial.println(F("Error in opening HTTP session"));   
+    }
+  } else {
+    Serial.println(F("Error in opening SSL stack"));
+  }
+  sendATcommand("AT+CHTTPSCLSE", "OK", 5000);  // close http session
+  sendATcommand("AT+CHTTPSSTOP", "OK", 5000);  // stop http stack
+  delay(5000);
+  digitalWrite(FONA_RST, HIGH);
+  delay(10);
+  digitalWrite(FONA_RST, LOW);
+  delay(100);
+  digitalWrite(FONA_RST, HIGH);
+  delay(7000);
+  return;
+}
 
+int8_t sendATcommand(char* ATcommand, char* expected_answer, unsigned int timeout){
+    unsigned long previous;
+    
+    delay(300); // Delay to be sure no passed commands interfere
+    
+    while( fonaSS.available() > 0) fonaSS.read();    // Wait for clean input buffer
+    
+    fonaSS.println(ATcommand); // Send the AT command 
+ 
+    previous = millis();
+    
+    // this loop waits for the answer
+    do {
+        // if there are data in the UART input buffer, reads it and checks for the answer
+        if(fonaSS.available() != 0) {
+          
+              char a = fonaSS.read();
+              char b = fonaSS.read();
+              Serial.print(a);
+              Serial.print(b);
+              if ((a == 'K' || b == 'K') || (a == '>' || b == '>')) {
+                return 1;
+              }
+        }
+    // Waits for the answer with time out
+    } while((millis() - previous) < timeout);
+ 
+    return 0;
+}
 
 // returns temp from one DS18B20 in C or F
-float getTemp(int units) { 
+float getTemp() { 
+  OneWire ds(8);
   byte data[12];
   byte addr[8];
+
 
   if ( !ds.search(addr)) {// no more sensors on chain, reset search
     ds.reset_search();
     return -1000;
   }
-  if ( OneWire::crc8( addr, 7) != addr[7]) {
-    Serial.println("CRC is not valid!");
-    return -1000;
-  }
-  if ( addr[0] != 0x10 && addr[0] != 0x28) {
-    Serial.print("Device is not recognized");
-    return -1000;
-  }
-
+  
   ds.reset();
+//  ds.select((uint8_t*) "0x28, 0x9D, 0xF2, 0x97, 0x05, 0x00, 0x00, 0x9");
   ds.select(addr);
   ds.write(0x44,1); // start conversion, with parasite power on at the end
   byte present = ds.reset();
   ds.select(addr);
+//  ds.select((uint8_t*) "0x28, 0x9D, 0xF2, 0x97, 0x05, 0x00, 0x00, 0x9");
   ds.write(0xBE); // Read Scratchpad
-  for (int i = 0; i < 9; i++) { // we need 9 bytes
-    data[i] = ds.read();
-  }
+  
+  data[0] = ds.read();
+  data[1] = ds.read();
+  data[2] = ds.read();
+  data[3] = ds.read();
+  data[4] = ds.read();
+  data[5] = ds.read();
+  data[6] = ds.read();
+  data[7] = ds.read();
+  data[8] = ds.read();
   ds.reset_search();
-  byte MSB = data[1];
-  byte LSB = data[0];
-  float tempRead = ((MSB << 8) | LSB); //using two's compliment
-  float TemperatureSum = tempRead / 16;
-  if (units >= 0) {
-    TemperatureSum = TemperatureSum * (9/5) + 32;
-  }
+  float TemperatureSum = ((data[1] << 8) | data[0]) / 16.0;  //using two's compliment
+  TemperatureSum = TemperatureSum * (9/5) + 32; // convert to F
   
-//  Serial.print("Temp: ");
-//  Serial.println(TemperatureSum);
-  return TemperatureSum + tempOffset;
+  return TemperatureSum + 17.0;
 }
 
-// returns current pH
+//// returns current pH
 float getpH() {
-  static unsigned long samplingTime = millis();
-  static unsigned long printTime = millis();
-  static float pHValue, voltage;
-  if (millis() - samplingTime > samplingInterval) {
-      pHArray[pHArrayIndex++] = analogRead(phPin);
-      if (pHArrayIndex == ArrayLength) {
-        pHArrayIndex = 0;
-      }
-      voltage = averageArray(pHArray, ArrayLength) * 5.0/1024;
-      pHValue = 3.5 * voltage + Offset;
-      samplingTime = millis();
-  }
-  if (millis() - printTime > printInterval) {   //Every 800 milliseconds, print a numerical, convert the state of the LED indicator
-    Serial.print("Voltage:");
-    Serial.println(voltage,2);
-//    Serial.print("    pH value: ");
-//    Serial.println(pHValue,2);
-    digitalWrite(LED,digitalRead(LED)^1);
-    printTime = millis();
-  }
-  return pHValue; 
+  return (float) 3.5 * (analogRead(phPin) * 5.0/1024) + Offset;
 }
 
-// returns current turbidity/tds
-float getTurbidity () {
-   float sensorValue = analogRead(turbidityPin);
-   Serial.println(sensorValue);
-   float voltage = sensorValue * (5.0/1023.0);
-   Serial.print("Turbidity voltage: ");
-   Serial.println(voltage, DEC);
-   float turbidity = -1.333*log(voltage) + 4.71;
-   return turbidity;
+//Interrupt service routine for external interrupt on INT0 pin conntected to DS1337 /INT
+void INT0_ISR()
+{
+    // Keep this as short as possible. Possibly avoid using function calls
+    detachInterrupt(0); 
+    interruptTime = DateTime(interruptTime.get() + interruptInterval);  //decide the time for next interrupt, configure next interrupt  
 }
 
-float getThermistorTemp() {
-   float sensorValue = analogRead(turbidityPin);
-   float temp;
-   temp = log(10000.0*((1024.0/sensorValue-1)));
-   temp = 1 / (0.001129148 + (0.000234125 + (0.0000000876741 * temp * temp ))* temp);
-   temp = temp - 273.15;            // Convert Kelvin to Celcius
-   temp = (temp * 9.0)/ 5.0 + 32.0; // Convert Celcius to Fahrenheit
-   return temp;
+void blinkLED(int seconds) {
+  digitalWrite(LED, HIGH);
+  delay(seconds);
+  digitalWrite(LED, LOW);
+  delay(seconds);
+  digitalWrite(LED, HIGH);
+  delay(seconds);
+  digitalWrite(LED, LOW);
 }
-
-
-double averageArray(int* arr, int number) {
-  int i;
-  int max, min;
-  double avg;
-  long amount = 0;
-  if (number <= 0) {
-    Serial.println("Error: averageArray(): number can't be less than or equal to 0/n");
-    return 0;
-  }
-  if (number < 5) {   
-    for (i = 0; i < number; i++) {
-      amount += arr[i];
-    }
-    avg = amount/number;
-    return avg;
-  } else {
-    if (arr[0] < arr[1]) {
-      min = arr[0];
-      max = arr[1];
-    } else {
-      min = arr[1];
-      max = arr[0];
-    }
-    for (i = 2; i < number; i++) {
-      if (arr[i] < min) {
-        amount += min;        //arr<min
-        min = arr[i];
-      } else {
-        if (arr[i] > max) {
-          amount += max;    //arr>max
-          max = arr[i];
-        } else {
-          amount += arr[i]; //min<=arr<=max
-        }
-      } // end if
-    } // end for
-    avg = (double) amount / (number-2);
-  } // end if
-  return avg;
-}
-
-String formPOSTRequest(float pH, float temp, float tds) {
-  String request = "";
-  
-  return request;
-}
-
-
-
-
